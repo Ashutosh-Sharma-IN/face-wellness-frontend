@@ -1,9 +1,8 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 
-const API_URL = process.env.REACT_APP_BACKEND_URL;
+const API_URL = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "");
 const GOOGLE_CLIENT_ID = process.env.REACT_APP_GOOGLE_CLIENT_ID;
-
 function App() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
