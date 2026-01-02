@@ -1,7 +1,16 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 
-const API_URL = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "");
+// FIX: Ensure API_URL has proper protocol
+const API_URL = (() => {
+  let url = process.env.REACT_APP_BACKEND_URL || "";
+  url = url.replace(/\/$/, ""); // Remove trailing slash
+  if (url && !url.startsWith('http://') && !url.startsWith('https://')) {
+    url = 'https://' + url; // Add https if missing
+  }
+  return url;
+})();
+
 const GOOGLE_CLIENT_ID = process.env.REACT_APP_GOOGLE_CLIENT_ID;
 
 function App() {
@@ -14,6 +23,8 @@ function App() {
   const [history, setHistory] = useState([]);
   const [cameraStream, setCameraStream] = useState(null);
   const [capturedImage, setCapturedImage] = useState(null);
+  const [cameraError, setCameraError] = useState(null);
+  const [showCamera, setShowCamera] = useState(false); // NEW: Controls camera visibility
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
 
@@ -21,7 +32,7 @@ function App() {
     checkAuth();
   }, []);
 
-  // FIX 1: Add cleanup for camera stream
+  // FIX: Cleanup camera stream on unmount
   useEffect(() => {
     return () => {
       if (cameraStream) {
@@ -29,6 +40,23 @@ function App() {
       }
     };
   }, [cameraStream]);
+
+  // FIX: Handle stream assignment AFTER video element is in DOM
+  useEffect(() => {
+    if (cameraStream && videoRef.current) {
+      console.log('🎥 Assigning stream to video element');
+      videoRef.current.srcObject = cameraStream;
+      
+      videoRef.current.onloadedmetadata = () => {
+        console.log('🎥 Video metadata loaded, attempting to play');
+        videoRef.current.play().catch(err => {
+          console.error('Video play failed:', err);
+          videoRef.current.muted = true;
+          videoRef.current.play().catch(e => console.error('Muted play also failed:', e));
+        });
+      };
+    }
+  }, [cameraStream, showCamera]); // Runs when stream OR showCamera changes
 
   const checkAuth = async () => {
     const sessionToken = localStorage.getItem('session_token');
@@ -89,9 +117,16 @@ function App() {
     }
   };
 
-  // FIX 2: Improved camera start with explicit video element setup
+  // FIX: Completely rewritten camera start function
   const startCamera = async () => {
+    console.log('📸 startCamera called');
+    setCameraError(null);
+    
     try {
+      // First, show the camera container (video element)
+      setShowCamera(true);
+      
+      console.log('📸 Requesting camera access...');
       const stream = await navigator.mediaDevices.getUserMedia({ 
         video: { 
           facingMode: 'user',
@@ -101,68 +136,77 @@ function App() {
         audio: false 
       });
       
+      console.log('📸 Camera access granted, stream:', stream);
+      console.log('📸 Stream tracks:', stream.getTracks());
+      
+      // Store the stream - useEffect will handle assigning to video
       setCameraStream(stream);
       
-      // Wait for video element to be ready
-      if (videoRef.current) {
-        videoRef.current.srcObject = stream;
-        
-        // Force video to play and handle autoplay restrictions
-        videoRef.current.onloadedmetadata = () => {
-          videoRef.current.play().catch(err => {
-            console.error('Video play failed:', err);
-            // Try muted playback if autoplay fails
-            videoRef.current.muted = true;
-            videoRef.current.play();
-          });
-        };
-      }
     } catch (error) {
-      console.error('Camera access failed:', error);
+      console.error('❌ Camera access failed:', error);
+      setShowCamera(false);
+      
       if (error.name === 'NotAllowedError') {
-        alert('Camera permission denied. Please allow camera access in your browser settings.');
+        setCameraError('Camera permission denied. Please allow camera access in your browser settings.');
       } else if (error.name === 'NotFoundError') {
-        alert('No camera found. Please connect a camera and try again.');
+        setCameraError('No camera found. Please connect a camera and try again.');
+      } else if (error.name === 'NotReadableError') {
+        setCameraError('Camera is in use by another application. Please close other apps using the camera.');
       } else {
-        alert('Camera access failed. Please enable camera permissions and try again.');
+        setCameraError(`Camera access failed: ${error.message}`);
       }
     }
   };
 
   const stopCamera = () => {
+    console.log('📸 Stopping camera');
     if (cameraStream) {
-      cameraStream.getTracks().forEach(track => track.stop());
+      cameraStream.getTracks().forEach(track => {
+        console.log('📸 Stopping track:', track.kind);
+        track.stop();
+      });
       setCameraStream(null);
-      if (videoRef.current) {
-        videoRef.current.srcObject = null;
-      }
     }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    setShowCamera(false);
+    setCameraError(null);
   };
 
   const capturePhoto = () => {
+    console.log('📷 Capturing photo...');
     if (videoRef.current && canvasRef.current) {
       const canvas = canvasRef.current;
       const video = videoRef.current;
       
-      // Ensure video is playing
-      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+      console.log('📷 Video readyState:', video.readyState);
+      console.log('📷 Video dimensions:', video.videoWidth, 'x', video.videoHeight);
+      
+      if (video.readyState >= video.HAVE_CURRENT_DATA && video.videoWidth > 0) {
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
         
         const ctx = canvas.getContext('2d');
+        // Mirror the image to match the preview
+        ctx.translate(canvas.width, 0);
+        ctx.scale(-1, 1);
         ctx.drawImage(video, 0, 0);
         
         canvas.toBlob(async (blob) => {
           if (blob) {
+            console.log('📷 Photo captured, blob size:', blob.size);
             setCapturedImage(blob);
             stopCamera();
           } else {
             alert('Failed to capture photo. Please try again.');
           }
-        }, 'image/jpeg', 0.8);
+        }, 'image/jpeg', 0.9);
       } else {
-        alert('Video not ready. Please wait a moment and try again.');
+        alert('Video not ready yet. Please wait a moment and try again.');
       }
+    } else {
+      console.error('📷 Video or canvas ref not available');
     }
   };
 
@@ -202,9 +246,8 @@ function App() {
     }
   };
 
-  // FIX 3: Improved insights fetch with loading state
   const fetchInsights = async () => {
-    setInsights(null); // Reset to show loading
+    setInsights(null);
     try {
       const response = await fetch(`${API_URL}/api/insights`, {
         headers: { 'session-token': localStorage.getItem('session_token') }
@@ -223,7 +266,7 @@ function App() {
   };
 
   const fetchHistory = async () => {
-    setHistory([]); // Reset to show loading
+    setHistory([]);
     try {
       const response = await fetch(`${API_URL}/api/analysis/history`, {
         headers: { 'session-token': localStorage.getItem('session_token') }
@@ -238,7 +281,7 @@ function App() {
   };
 
   const logout = () => {
-    stopCamera(); // Stop camera if running
+    stopCamera();
     localStorage.removeItem('session_token');
     setUser(null);
     setCurrentView('home');
@@ -350,7 +393,6 @@ function App() {
         </div>
       </header>
 
-      {/* FIX 4: Improved navigation with proper state management */}
       <nav className="bg-white border-b">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex space-x-8">
@@ -358,14 +400,12 @@ function App() {
               <button
                 key={view}
                 onClick={() => {
-                  // Stop camera when navigating away
                   if (view !== 'camera') {
                     stopCamera();
                   }
                   
                   setCurrentView(view);
                   
-                  // Fetch data when navigating to specific views
                   if (view === 'insights') {
                     fetchInsights();
                   } else if (view === 'history') {
@@ -408,7 +448,21 @@ function App() {
             <div className="bg-white rounded-lg shadow p-6">
               <h3 className="text-lg font-semibold text-gray-800 mb-4">Take Today's Photo</h3>
               
-              {!cameraStream && !capturedImage && (
+              {/* Error display */}
+              {cameraError && (
+                <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+                  {cameraError}
+                  <button 
+                    onClick={() => setCameraError(null)}
+                    className="ml-2 underline"
+                  >
+                    Dismiss
+                  </button>
+                </div>
+              )}
+              
+              {/* Initial state - no camera, no captured image */}
+              {!showCamera && !capturedImage && (
                 <div className="text-center">
                   <div className="bg-gray-100 rounded-lg p-8 mb-4">
                     <div className="text-6xl mb-4">📸</div>
@@ -423,20 +477,33 @@ function App() {
                 </div>
               )}
               
-              {cameraStream && (
+              {/* Camera view - FIX: Video element always exists when showCamera is true */}
+              {showCamera && !capturedImage && (
                 <div className="text-center">
-                  <video
-                    ref={videoRef}
-                    autoPlay
-                    playsInline
-                    muted
-                    className="w-full rounded-lg mb-4"
-                    style={{ transform: 'scaleX(-1)' }}
-                  />
+                  <div className="relative inline-block">
+                    <video
+                      ref={videoRef}
+                      autoPlay
+                      playsInline
+                      muted
+                      className="w-full max-w-sm rounded-lg mb-4 bg-black"
+                      style={{ transform: 'scaleX(-1)', minHeight: '300px' }}
+                    />
+                    {/* Loading overlay while stream is connecting */}
+                    {!cameraStream && (
+                      <div className="absolute inset-0 flex items-center justify-center bg-gray-900 bg-opacity-50 rounded-lg">
+                        <div className="text-white text-center">
+                          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto mb-2"></div>
+                          <p>Connecting to camera...</p>
+                        </div>
+                      </div>
+                    )}
+                  </div>
                   <div className="space-x-4">
                     <button
                       onClick={capturePhoto}
-                      className="bg-green-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-green-700 transition-colors"
+                      disabled={!cameraStream}
+                      className="bg-green-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
                     >
                       📷 Capture Photo
                     </button>
@@ -450,9 +517,15 @@ function App() {
                 </div>
               )}
               
+              {/* Captured image preview */}
               {capturedImage && (
                 <div className="text-center">
                   <div className="bg-gray-100 rounded-lg p-4 mb-4">
+                    <img 
+                      src={URL.createObjectURL(capturedImage)} 
+                      alt="Captured" 
+                      className="w-full max-w-sm mx-auto rounded-lg mb-4"
+                    />
                     <p className="text-gray-600 mb-4">📸 Photo captured! Ready to analyze?</p>
                     <div className="space-x-4">
                       <button
