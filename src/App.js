@@ -3,6 +3,7 @@ import './App.css';
 
 const API_URL = (process.env.REACT_APP_BACKEND_URL || "").replace(/\/$/, "");
 const GOOGLE_CLIENT_ID = process.env.REACT_APP_GOOGLE_CLIENT_ID;
+
 function App() {
   const [user, setUser] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -19,6 +20,15 @@ function App() {
   useEffect(() => {
     checkAuth();
   }, []);
+
+  // FIX 1: Add cleanup for camera stream
+  useEffect(() => {
+    return () => {
+      if (cameraStream) {
+        cameraStream.getTracks().forEach(track => track.stop());
+      }
+    };
+  }, [cameraStream]);
 
   const checkAuth = async () => {
     const sessionToken = localStorage.getItem('session_token');
@@ -42,7 +52,6 @@ function App() {
   };
 
   const handleLogin = () => {
-    // Initialize Google Sign-In
     if (window.google) {
       window.google.accounts.id.initialize({
         client_id: GOOGLE_CLIENT_ID,
@@ -80,19 +89,43 @@ function App() {
     }
   };
 
+  // FIX 2: Improved camera start with explicit video element setup
   const startCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: { facingMode: 'user' },
+        video: { 
+          facingMode: 'user',
+          width: { ideal: 1280 },
+          height: { ideal: 720 }
+        },
         audio: false 
       });
+      
       setCameraStream(stream);
+      
+      // Wait for video element to be ready
       if (videoRef.current) {
         videoRef.current.srcObject = stream;
+        
+        // Force video to play and handle autoplay restrictions
+        videoRef.current.onloadedmetadata = () => {
+          videoRef.current.play().catch(err => {
+            console.error('Video play failed:', err);
+            // Try muted playback if autoplay fails
+            videoRef.current.muted = true;
+            videoRef.current.play();
+          });
+        };
       }
     } catch (error) {
       console.error('Camera access failed:', error);
-      alert('Camera access failed. Please enable camera permissions.');
+      if (error.name === 'NotAllowedError') {
+        alert('Camera permission denied. Please allow camera access in your browser settings.');
+      } else if (error.name === 'NotFoundError') {
+        alert('No camera found. Please connect a camera and try again.');
+      } else {
+        alert('Camera access failed. Please enable camera permissions and try again.');
+      }
     }
   };
 
@@ -100,6 +133,9 @@ function App() {
     if (cameraStream) {
       cameraStream.getTracks().forEach(track => track.stop());
       setCameraStream(null);
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
     }
   };
 
@@ -108,16 +144,25 @@ function App() {
       const canvas = canvasRef.current;
       const video = videoRef.current;
       
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(video, 0, 0);
-      
-      canvas.toBlob(async (blob) => {
-        setCapturedImage(blob);
-        stopCamera();
-      }, 'image/jpeg', 0.8);
+      // Ensure video is playing
+      if (video.readyState === video.HAVE_ENOUGH_DATA) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(video, 0, 0);
+        
+        canvas.toBlob(async (blob) => {
+          if (blob) {
+            setCapturedImage(blob);
+            stopCamera();
+          } else {
+            alert('Failed to capture photo. Please try again.');
+          }
+        }, 'image/jpeg', 0.8);
+      } else {
+        alert('Video not ready. Please wait a moment and try again.');
+      }
     }
   };
 
@@ -141,10 +186,9 @@ function App() {
         setCapturedImage(null);
         setCurrentView('results');
         
-        // Update user stats
         setUser(prev => ({
           ...prev,
-          total_photos: prev.total_photos + 1
+          total_photos: (prev?.total_photos || 0) + 1
         }));
       } else {
         const error = await response.json();
@@ -158,7 +202,9 @@ function App() {
     }
   };
 
+  // FIX 3: Improved insights fetch with loading state
   const fetchInsights = async () => {
+    setInsights(null); // Reset to show loading
     try {
       const response = await fetch(`${API_URL}/api/insights`, {
         headers: { 'session-token': localStorage.getItem('session_token') }
@@ -166,20 +212,25 @@ function App() {
       if (response.ok) {
         const data = await response.json();
         setInsights(data);
+      } else {
+        console.error('Failed to fetch insights');
+        setInsights({ message: 'Failed to load insights', insights: [] });
       }
     } catch (error) {
       console.error('Failed to fetch insights:', error);
+      setInsights({ message: 'Failed to load insights', insights: [] });
     }
   };
 
   const fetchHistory = async () => {
+    setHistory([]); // Reset to show loading
     try {
       const response = await fetch(`${API_URL}/api/analysis/history`, {
         headers: { 'session-token': localStorage.getItem('session_token') }
       });
       if (response.ok) {
         const data = await response.json();
-        setHistory(data.history);
+        setHistory(data.history || []);
       }
     } catch (error) {
       console.error('Failed to fetch history:', error);
@@ -187,6 +238,7 @@ function App() {
   };
 
   const logout = () => {
+    stopCamera(); // Stop camera if running
     localStorage.removeItem('session_token');
     setUser(null);
     setCurrentView('home');
@@ -272,7 +324,6 @@ function App() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-purple-50">
-      {/* Header */}
       <header className="bg-white shadow-sm border-b">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center py-4">
@@ -299,7 +350,7 @@ function App() {
         </div>
       </header>
 
-      {/* Navigation */}
+      {/* FIX 4: Improved navigation with proper state management */}
       <nav className="bg-white border-b">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex space-x-8">
@@ -307,9 +358,19 @@ function App() {
               <button
                 key={view}
                 onClick={() => {
+                  // Stop camera when navigating away
+                  if (view !== 'camera') {
+                    stopCamera();
+                  }
+                  
                   setCurrentView(view);
-                  if (view === 'insights') fetchInsights();
-                  if (view === 'history') fetchHistory();
+                  
+                  // Fetch data when navigating to specific views
+                  if (view === 'insights') {
+                    fetchInsights();
+                  } else if (view === 'history') {
+                    fetchHistory();
+                  }
                 }}
                 className={`py-4 px-2 border-b-2 font-medium text-sm capitalize ${
                   currentView === view
@@ -324,21 +385,20 @@ function App() {
         </div>
       </nav>
 
-      {/* Main Content */}
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
         {currentView === 'home' && (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div className="bg-white rounded-lg shadow p-6">
               <h3 className="text-lg font-semibold text-gray-800 mb-2">Total Photos</h3>
-              <p className="text-3xl font-bold text-blue-600">{user.total_photos}</p>
+              <p className="text-3xl font-bold text-blue-600">{user.total_photos || 0}</p>
             </div>
             <div className="bg-white rounded-lg shadow p-6">
               <h3 className="text-lg font-semibold text-gray-800 mb-2">Current Streak</h3>
-              <p className="text-3xl font-bold text-green-600">{user.current_streak} days</p>
+              <p className="text-3xl font-bold text-green-600">{user.current_streak || 0} days</p>
             </div>
             <div className="bg-white rounded-lg shadow p-6">
               <h3 className="text-lg font-semibold text-gray-800 mb-2">Longest Streak</h3>
-              <p className="text-3xl font-bold text-purple-600">{user.longest_streak} days</p>
+              <p className="text-3xl font-bold text-purple-600">{user.longest_streak || 0} days</p>
             </div>
           </div>
         )}
@@ -369,6 +429,7 @@ function App() {
                     ref={videoRef}
                     autoPlay
                     playsInline
+                    muted
                     className="w-full rounded-lg mb-4"
                     style={{ transform: 'scaleX(-1)' }}
                   />
@@ -377,7 +438,7 @@ function App() {
                       onClick={capturePhoto}
                       className="bg-green-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-green-700 transition-colors"
                     >
-                      Capture Photo
+                      📷 Capture Photo
                     </button>
                     <button
                       onClick={stopCamera}
@@ -392,20 +453,23 @@ function App() {
               {capturedImage && (
                 <div className="text-center">
                   <div className="bg-gray-100 rounded-lg p-4 mb-4">
-                    <p className="text-gray-600 mb-4">Photo captured! Ready to analyze?</p>
+                    <p className="text-gray-600 mb-4">📸 Photo captured! Ready to analyze?</p>
                     <div className="space-x-4">
                       <button
                         onClick={analyzePhoto}
                         disabled={uploadLoading}
                         className="bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-blue-700 transition-colors disabled:opacity-50"
                       >
-                        {uploadLoading ? 'Analyzing...' : 'Analyze Photo'}
+                        {uploadLoading ? '⏳ Analyzing...' : '🔍 Analyze Photo'}
                       </button>
                       <button
-                        onClick={() => setCapturedImage(null)}
+                        onClick={() => {
+                          setCapturedImage(null);
+                          startCamera();
+                        }}
                         className="bg-gray-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-gray-700 transition-colors"
                       >
-                        Retake
+                        🔄 Retake
                       </button>
                     </div>
                   </div>
@@ -488,35 +552,43 @@ function App() {
               
               {insights ? (
                 <div className="space-y-6">
-                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                    <div className="bg-blue-50 rounded-lg p-4 text-center">
-                      <p className="text-sm text-blue-800 font-medium">Avg Eye Puffiness</p>
-                      <p className="text-2xl font-bold text-blue-600">{insights.averages.eye_pouch}</p>
+                  {insights.averages && (
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <div className="bg-blue-50 rounded-lg p-4 text-center">
+                        <p className="text-sm text-blue-800 font-medium">Avg Eye Puffiness</p>
+                        <p className="text-2xl font-bold text-blue-600">{insights.averages.eye_pouch}</p>
+                      </div>
+                      <div className="bg-purple-50 rounded-lg p-4 text-center">
+                        <p className="text-sm text-purple-800 font-medium">Avg Dark Circles</p>
+                        <p className="text-2xl font-bold text-purple-600">{insights.averages.dark_circle}</p>
+                      </div>
+                      <div className="bg-green-50 rounded-lg p-4 text-center">
+                        <p className="text-sm text-green-800 font-medium">Avg Skin Age</p>
+                        <p className="text-2xl font-bold text-green-600">{insights.averages.skin_age}</p>
+                      </div>
                     </div>
-                    <div className="bg-purple-50 rounded-lg p-4 text-center">
-                      <p className="text-sm text-purple-800 font-medium">Avg Dark Circles</p>
-                      <p className="text-2xl font-bold text-purple-600">{insights.averages.dark_circle}</p>
-                    </div>
-                    <div className="bg-green-50 rounded-lg p-4 text-center">
-                      <p className="text-sm text-green-800 font-medium">Avg Skin Age</p>
-                      <p className="text-2xl font-bold text-green-600">{insights.averages.skin_age}</p>
-                    </div>
-                  </div>
+                  )}
                   
                   <div className="space-y-4">
                     <h4 className="font-semibold text-gray-800">Personalized Recommendations</h4>
-                    {insights.insights.map((insight, index) => (
-                      <div
-                        key={index}
-                        className={`p-4 rounded-lg ${
-                          insight.type === 'success' ? 'bg-green-50 border-green-200' :
-                          insight.type === 'warning' ? 'bg-yellow-50 border-yellow-200' :
-                          'bg-blue-50 border-blue-200'
-                        } border`}
-                      >
-                        <p className="text-sm">{insight.message}</p>
+                    {insights.insights && insights.insights.length > 0 ? (
+                      insights.insights.map((insight, index) => (
+                        <div
+                          key={index}
+                          className={`p-4 rounded-lg ${
+                            insight.type === 'success' ? 'bg-green-50 border-green-200' :
+                            insight.type === 'warning' ? 'bg-yellow-50 border-yellow-200' :
+                            'bg-blue-50 border-blue-200'
+                          } border`}
+                        >
+                          <p className="text-sm">{insight.message}</p>
+                        </div>
+                      ))
+                    ) : (
+                      <div className="text-center py-4 text-gray-600">
+                        {insights.message || 'No insights available yet. Take more photos to generate insights!'}
                       </div>
-                    ))}
+                    )}
                   </div>
                 </div>
               ) : (
@@ -534,7 +606,7 @@ function App() {
             <div className="bg-white rounded-lg shadow p-6">
               <h3 className="text-lg font-semibold text-gray-800 mb-6">Analysis History</h3>
               
-              {history.length > 0 ? (
+              {history && history.length > 0 ? (
                 <div className="space-y-4">
                   {history.map((analysis, index) => (
                     <div key={index} className="border border-gray-200 rounded-lg p-4">
