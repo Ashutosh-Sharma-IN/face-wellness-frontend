@@ -1,17 +1,27 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import './App.css';
+
+// Debug logging helper
+const DEBUG = true;
+const log = (...args) => {
+  if (DEBUG) {
+    console.log(`[${new Date().toISOString().split('T')[1].slice(0, 8)}]`, ...args);
+  }
+};
 
 // FIX: Ensure API_URL has proper protocol
 const API_URL = (() => {
   let url = process.env.REACT_APP_BACKEND_URL || "";
-  url = url.replace(/\/$/, ""); // Remove trailing slash
+  url = url.trim().replace(/\/$/, "");
   if (url && !url.startsWith('http://') && !url.startsWith('https://')) {
-    url = 'https://' + url; // Add https if missing
+    url = 'https://' + url;
   }
+  log('🌐 API_URL configured as:', url);
   return url;
 })();
 
 const GOOGLE_CLIENT_ID = process.env.REACT_APP_GOOGLE_CLIENT_ID;
+log('🔑 Google Client ID:', GOOGLE_CLIENT_ID ? `${GOOGLE_CLIENT_ID.slice(0, 20)}...` : 'NOT SET');
 
 function App() {
   const [user, setUser] = useState(null);
@@ -24,55 +34,146 @@ function App() {
   const [cameraStream, setCameraStream] = useState(null);
   const [capturedImage, setCapturedImage] = useState(null);
   const [cameraError, setCameraError] = useState(null);
-  const [showCamera, setShowCamera] = useState(false); // NEW: Controls camera visibility
+  const [debugInfo, setDebugInfo] = useState({});
+  const [showDebug, setShowDebug] = useState(true);
+  
   const videoRef = useRef(null);
   const canvasRef = useRef(null);
 
-  useEffect(() => {
-    checkAuth();
+  // Update debug info
+  const updateDebug = useCallback((key, value) => {
+    setDebugInfo(prev => ({ ...prev, [key]: value, lastUpdate: new Date().toISOString() }));
   }, []);
 
-  // FIX: Cleanup camera stream on unmount
+  useEffect(() => {
+    log('🚀 App mounted');
+    updateDebug('appMounted', true);
+    updateDebug('apiUrl', API_URL);
+    updateDebug('googleClientId', GOOGLE_CLIENT_ID ? 'SET' : 'NOT SET');
+    updateDebug('googleLibLoaded', !!window.google);
+    checkAuth();
+  }, [updateDebug]);
+
+  // Check Google library loaded
+  useEffect(() => {
+    const checkGoogle = setInterval(() => {
+      if (window.google) {
+        log('✅ Google library loaded');
+        updateDebug('googleLibLoaded', true);
+        clearInterval(checkGoogle);
+      }
+    }, 500);
+    
+    setTimeout(() => clearInterval(checkGoogle), 10000);
+    return () => clearInterval(checkGoogle);
+  }, [updateDebug]);
+
+  // Cleanup camera stream
   useEffect(() => {
     return () => {
       if (cameraStream) {
+        log('🧹 Cleaning up camera stream');
         cameraStream.getTracks().forEach(track => track.stop());
       }
     };
   }, [cameraStream]);
 
-  // FIX: Handle stream assignment AFTER video element is in DOM
+  // CRITICAL: Handle video element and stream connection
   useEffect(() => {
+    log('🎥 Video/Stream effect triggered', {
+      hasStream: !!cameraStream,
+      hasVideoRef: !!videoRef.current,
+      videoRefId: videoRef.current?.id
+    });
+    
+    updateDebug('hasStream', !!cameraStream);
+    updateDebug('hasVideoRef', !!videoRef.current);
+
     if (cameraStream && videoRef.current) {
-      console.log('🎥 Assigning stream to video element');
-      videoRef.current.srcObject = cameraStream;
+      log('🎥 Attempting to connect stream to video element');
       
-      videoRef.current.onloadedmetadata = () => {
-        console.log('🎥 Video metadata loaded, attempting to play');
-        videoRef.current.play().catch(err => {
-          console.error('Video play failed:', err);
-          videoRef.current.muted = true;
-          videoRef.current.play().catch(e => console.error('Muted play also failed:', e));
-        });
-      };
+      const video = videoRef.current;
+      
+      // Clear any existing srcObject first
+      video.srcObject = null;
+      
+      // Small delay to ensure DOM is ready
+      setTimeout(() => {
+        try {
+          video.srcObject = cameraStream;
+          log('✅ Stream assigned to video.srcObject');
+          updateDebug('srcObjectAssigned', true);
+          
+          video.onloadedmetadata = () => {
+            log('✅ Video metadata loaded', {
+              videoWidth: video.videoWidth,
+              videoHeight: video.videoHeight,
+              readyState: video.readyState
+            });
+            updateDebug('videoWidth', video.videoWidth);
+            updateDebug('videoHeight', video.videoHeight);
+            updateDebug('readyState', video.readyState);
+            
+            video.play()
+              .then(() => {
+                log('✅ Video playing successfully');
+                updateDebug('videoPlaying', true);
+              })
+              .catch(err => {
+                log('❌ Video play failed:', err.message);
+                updateDebug('playError', err.message);
+                // Try muted
+                video.muted = true;
+                video.play()
+                  .then(() => {
+                    log('✅ Video playing (muted)');
+                    updateDebug('videoPlaying', 'muted');
+                  })
+                  .catch(e => {
+                    log('❌ Muted play also failed:', e.message);
+                    updateDebug('playError', `muted also failed: ${e.message}`);
+                  });
+              });
+          };
+          
+          video.onerror = (e) => {
+            log('❌ Video element error:', e);
+            updateDebug('videoError', e.message || 'unknown error');
+          };
+          
+        } catch (err) {
+          log('❌ Error assigning srcObject:', err);
+          updateDebug('srcObjectError', err.message);
+        }
+      }, 100);
     }
-  }, [cameraStream, showCamera]); // Runs when stream OR showCamera changes
+  }, [cameraStream, currentView, updateDebug]);
 
   const checkAuth = async () => {
+    log('🔐 Checking auth...');
     const sessionToken = localStorage.getItem('session_token');
+    updateDebug('hasSessionToken', !!sessionToken);
+    
     if (sessionToken) {
       try {
+        log('🔐 Verifying session token with backend...');
         const response = await fetch(`${API_URL}/api/user/profile`, {
           headers: { 'session-token': sessionToken }
         });
+        log('🔐 Profile response status:', response.status);
+        
         if (response.ok) {
           const data = await response.json();
+          log('✅ User authenticated:', data.user?.email);
           setUser(data.user);
+          updateDebug('userEmail', data.user?.email);
         } else {
+          log('❌ Session invalid, removing token');
           localStorage.removeItem('session_token');
         }
       } catch (error) {
-        console.error('Auth check failed:', error);
+        log('❌ Auth check failed:', error.message);
+        updateDebug('authError', error.message);
         localStorage.removeItem('session_token');
       }
     }
@@ -80,89 +181,163 @@ function App() {
   };
 
   const handleLogin = () => {
-    if (window.google) {
+    log('🔐 handleLogin called');
+    updateDebug('loginAttempted', new Date().toISOString());
+    
+    if (!window.google) {
+      log('❌ Google library not loaded');
+      updateDebug('loginError', 'Google library not loaded');
+      alert('Google Sign-In is still loading. Please wait a moment and try again.');
+      return;
+    }
+    
+    try {
+      log('🔐 Initializing Google Sign-In...');
       window.google.accounts.id.initialize({
         client_id: GOOGLE_CLIENT_ID,
-        callback: handleGoogleResponse
+        callback: handleGoogleResponse,
+        auto_select: false,
+        cancel_on_tap_outside: true,
       });
       
-      window.google.accounts.id.prompt();
-    } else {
-      console.error('Google Sign-In not loaded');
-      alert('Google Sign-In is loading, please try again in a moment.');
+      log('🔐 Prompting for Google Sign-In...');
+      window.google.accounts.id.prompt((notification) => {
+        log('🔐 Prompt notification:', notification);
+        updateDebug('promptNotification', JSON.stringify(notification));
+        
+        if (notification.isNotDisplayed()) {
+          log('❌ Prompt not displayed:', notification.getNotDisplayedReason());
+          updateDebug('promptNotDisplayed', notification.getNotDisplayedReason());
+          
+          // Fallback: try renderButton approach
+          log('🔐 Trying fallback button render...');
+          const buttonDiv = document.getElementById('google-signin-fallback');
+          if (buttonDiv) {
+            window.google.accounts.id.renderButton(buttonDiv, {
+              theme: 'outline',
+              size: 'large',
+              width: '100%'
+            });
+            updateDebug('fallbackButtonRendered', true);
+          }
+        }
+        
+        if (notification.isSkippedMoment()) {
+          log('⚠️ Prompt skipped:', notification.getSkippedReason());
+          updateDebug('promptSkipped', notification.getSkippedReason());
+        }
+      });
+    } catch (error) {
+      log('❌ Google Sign-In error:', error);
+      updateDebug('googleSignInError', error.message);
+      alert(`Sign-in error: ${error.message}`);
     }
   };
 
   const handleGoogleResponse = async (response) => {
+    log('🔐 Google response received');
+    updateDebug('googleResponseReceived', true);
+    
     try {
+      log('🔐 Sending credential to backend...');
       const result = await fetch(`${API_URL}/api/auth/google`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ credential: response.credential })
       });
       
+      log('🔐 Backend response status:', result.status);
+      
       if (result.ok) {
         const data = await result.json();
+        log('✅ Login successful:', data.user?.email);
         localStorage.setItem('session_token', data.session_token);
         setUser(data.user);
         setCurrentView('home');
+        updateDebug('loginSuccess', true);
       } else {
         const error = await result.json();
-        console.error('Login failed:', error);
+        log('❌ Login failed:', error);
+        updateDebug('loginFailed', JSON.stringify(error));
         alert('Login failed. Please try again.');
       }
     } catch (error) {
-      console.error('Login error:', error);
+      log('❌ Login error:', error.message);
+      updateDebug('loginError', error.message);
       alert('Login failed. Please try again.');
     }
   };
 
-  // FIX: Completely rewritten camera start function
   const startCamera = async () => {
-    console.log('📸 startCamera called');
+    log('📸 startCamera called');
     setCameraError(null);
+    updateDebug('cameraStartAttempt', new Date().toISOString());
     
     try {
-      // First, show the camera container (video element)
-      setShowCamera(true);
+      // Check if getUserMedia is available
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Camera API not available. Make sure you are using HTTPS.');
+      }
       
-      console.log('📸 Requesting camera access...');
-      const stream = await navigator.mediaDevices.getUserMedia({ 
+      log('📸 Requesting camera access...');
+      updateDebug('requestingCamera', true);
+      
+      const constraints = { 
         video: { 
           facingMode: 'user',
-          width: { ideal: 1280 },
-          height: { ideal: 720 }
+          width: { ideal: 640 },  // Lower resolution for testing
+          height: { ideal: 480 }
         },
         audio: false 
-      });
+      };
       
-      console.log('📸 Camera access granted, stream:', stream);
-      console.log('📸 Stream tracks:', stream.getTracks());
+      log('📸 Constraints:', JSON.stringify(constraints));
       
-      // Store the stream - useEffect will handle assigning to video
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
+      
+      log('📸 ✅ Camera access granted!');
+      log('📸 Stream active:', stream.active);
+      log('📸 Video tracks:', stream.getVideoTracks().length);
+      
+      const videoTrack = stream.getVideoTracks()[0];
+      if (videoTrack) {
+        log('📸 Track settings:', JSON.stringify(videoTrack.getSettings()));
+        updateDebug('trackSettings', JSON.stringify(videoTrack.getSettings()));
+      }
+      
+      updateDebug('streamActive', stream.active);
+      updateDebug('videoTracks', stream.getVideoTracks().length);
+      
       setCameraStream(stream);
       
     } catch (error) {
-      console.error('❌ Camera access failed:', error);
-      setShowCamera(false);
+      log('❌ Camera error:', error.name, error.message);
+      updateDebug('cameraError', `${error.name}: ${error.message}`);
       
+      let errorMessage = 'Camera access failed.';
       if (error.name === 'NotAllowedError') {
-        setCameraError('Camera permission denied. Please allow camera access in your browser settings.');
+        errorMessage = 'Camera permission denied. Please allow camera access in your browser settings and reload the page.';
       } else if (error.name === 'NotFoundError') {
-        setCameraError('No camera found. Please connect a camera and try again.');
+        errorMessage = 'No camera found on this device.';
       } else if (error.name === 'NotReadableError') {
-        setCameraError('Camera is in use by another application. Please close other apps using the camera.');
+        errorMessage = 'Camera is being used by another application.';
+      } else if (error.name === 'OverconstrainedError') {
+        errorMessage = 'Camera does not support the requested resolution.';
+      } else if (error.name === 'SecurityError') {
+        errorMessage = 'Camera access blocked. Make sure you are using HTTPS.';
       } else {
-        setCameraError(`Camera access failed: ${error.message}`);
+        errorMessage = `Camera error: ${error.message}`;
       }
+      
+      setCameraError(errorMessage);
     }
   };
 
   const stopCamera = () => {
-    console.log('📸 Stopping camera');
+    log('📸 stopCamera called');
     if (cameraStream) {
       cameraStream.getTracks().forEach(track => {
-        console.log('📸 Stopping track:', track.kind);
+        log('📸 Stopping track:', track.kind, track.label);
         track.stop();
       });
       setCameraStream(null);
@@ -170,50 +345,73 @@ function App() {
     if (videoRef.current) {
       videoRef.current.srcObject = null;
     }
-    setShowCamera(false);
     setCameraError(null);
+    updateDebug('cameraStopped', true);
   };
 
   const capturePhoto = () => {
-    console.log('📷 Capturing photo...');
-    if (videoRef.current && canvasRef.current) {
-      const canvas = canvasRef.current;
-      const video = videoRef.current;
-      
-      console.log('📷 Video readyState:', video.readyState);
-      console.log('📷 Video dimensions:', video.videoWidth, 'x', video.videoHeight);
-      
-      if (video.readyState >= video.HAVE_CURRENT_DATA && video.videoWidth > 0) {
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        
-        const ctx = canvas.getContext('2d');
-        // Mirror the image to match the preview
-        ctx.translate(canvas.width, 0);
-        ctx.scale(-1, 1);
-        ctx.drawImage(video, 0, 0);
-        
-        canvas.toBlob(async (blob) => {
-          if (blob) {
-            console.log('📷 Photo captured, blob size:', blob.size);
-            setCapturedImage(blob);
-            stopCamera();
-          } else {
-            alert('Failed to capture photo. Please try again.');
-          }
-        }, 'image/jpeg', 0.9);
-      } else {
-        alert('Video not ready yet. Please wait a moment and try again.');
-      }
-    } else {
-      console.error('📷 Video or canvas ref not available');
+    log('📷 capturePhoto called');
+    
+    if (!videoRef.current) {
+      log('❌ No video ref');
+      alert('Video element not ready');
+      return;
     }
+    
+    if (!canvasRef.current) {
+      log('❌ No canvas ref');
+      alert('Canvas element not ready');
+      return;
+    }
+    
+    const video = videoRef.current;
+    const canvas = canvasRef.current;
+    
+    log('📷 Video state:', {
+      readyState: video.readyState,
+      videoWidth: video.videoWidth,
+      videoHeight: video.videoHeight,
+      paused: video.paused,
+      ended: video.ended
+    });
+    
+    if (video.readyState < 2) {
+      alert('Video not ready yet. Please wait for the camera to fully load.');
+      return;
+    }
+    
+    if (video.videoWidth === 0 || video.videoHeight === 0) {
+      alert('Video dimensions are zero. Camera may not be properly connected.');
+      return;
+    }
+    
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    
+    const ctx = canvas.getContext('2d');
+    ctx.translate(canvas.width, 0);
+    ctx.scale(-1, 1);
+    ctx.drawImage(video, 0, 0);
+    
+    canvas.toBlob((blob) => {
+      if (blob) {
+        log('📷 ✅ Photo captured, size:', blob.size);
+        setCapturedImage(blob);
+        stopCamera();
+        updateDebug('photoCaptured', blob.size);
+      } else {
+        log('❌ Failed to create blob');
+        alert('Failed to capture photo');
+      }
+    }, 'image/jpeg', 0.9);
   };
 
   const analyzePhoto = async () => {
     if (!capturedImage) return;
     
+    log('🔍 Starting analysis...');
     setUploadLoading(true);
+    
     const formData = new FormData();
     formData.append('image', capturedImage, 'face-photo.jpg');
     
@@ -224,22 +422,22 @@ function App() {
         body: formData
       });
       
+      log('🔍 Analysis response:', response.status);
+      
       if (response.ok) {
         const data = await response.json();
+        log('✅ Analysis complete');
         setAnalysisResult(data);
         setCapturedImage(null);
         setCurrentView('results');
-        
-        setUser(prev => ({
-          ...prev,
-          total_photos: (prev?.total_photos || 0) + 1
-        }));
+        setUser(prev => ({ ...prev, total_photos: (prev?.total_photos || 0) + 1 }));
       } else {
         const error = await response.json();
+        log('❌ Analysis failed:', error);
         alert(error.detail || 'Analysis failed');
       }
     } catch (error) {
-      console.error('Analysis failed:', error);
+      log('❌ Analysis error:', error.message);
       alert('Analysis failed. Please try again.');
     } finally {
       setUploadLoading(false);
@@ -256,11 +454,9 @@ function App() {
         const data = await response.json();
         setInsights(data);
       } else {
-        console.error('Failed to fetch insights');
         setInsights({ message: 'Failed to load insights', insights: [] });
       }
     } catch (error) {
-      console.error('Failed to fetch insights:', error);
       setInsights({ message: 'Failed to load insights', insights: [] });
     }
   };
@@ -292,16 +488,13 @@ function App() {
 
   const formatDate = (dateString) => {
     return new Date(dateString).toLocaleDateString('en-US', {
-      month: 'short',
-      day: 'numeric',
-      year: 'numeric'
+      month: 'short', day: 'numeric', year: 'numeric'
     });
   };
 
-  const getScoreColor = (value, max = 3) => {
-    const percentage = (value / max) * 100;
-    if (percentage <= 30) return 'text-green-600';
-    if (percentage <= 60) return 'text-yellow-600';
+  const getScoreColor = (value) => {
+    if (value <= 1) return 'text-green-600';
+    if (value <= 2) return 'text-yellow-600';
     return 'text-red-600';
   };
 
@@ -314,6 +507,28 @@ function App() {
     return 'Normal';
   };
 
+  // Debug Panel Component
+  const DebugPanel = () => (
+    <div className="fixed bottom-0 left-0 right-0 bg-black bg-opacity-90 text-green-400 text-xs font-mono p-2 max-h-48 overflow-auto z-50">
+      <div className="flex justify-between items-center mb-2">
+        <span className="font-bold">🔧 Debug Panel</span>
+        <button onClick={() => setShowDebug(false)} className="text-red-400 hover:text-red-300">
+          [Hide]
+        </button>
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2">
+        {Object.entries(debugInfo).map(([key, value]) => (
+          <div key={key} className="truncate">
+            <span className="text-gray-400">{key}:</span>{' '}
+            <span className={typeof value === 'boolean' ? (value ? 'text-green-400' : 'text-red-400') : ''}>
+              {typeof value === 'boolean' ? (value ? '✓' : '✗') : String(value).slice(0, 30)}
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
   if (loading) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-purple-50 flex items-center justify-center">
@@ -321,6 +536,7 @@ function App() {
           <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-blue-600 mx-auto"></div>
           <p className="mt-4 text-gray-600">Loading...</p>
         </div>
+        {showDebug && <DebugPanel />}
       </div>
     );
   }
@@ -338,7 +554,7 @@ function App() {
             <div className="space-y-6">
               <div className="bg-blue-50 rounded-lg p-4">
                 <h3 className="font-semibold text-blue-800 mb-2">✨ What we analyze:</h3>
-                <ul className="text-sm text-blue-700 space-y-1">
+                <ul className="text-sm text-blue-700 space-y-1 text-left">
                   <li>• Eye puffiness & dark circles</li>
                   <li>• Skin age & wrinkles</li>
                   <li>• Fatigue indicators</li>
@@ -358,9 +574,27 @@ function App() {
                 </svg>
                 <span>Sign in with Google</span>
               </button>
+              
+              {/* Fallback Google Sign-In button container */}
+              <div id="google-signin-fallback" className="mt-4"></div>
+              
+              {/* Manual note about incognito */}
+              <p className="text-xs text-gray-500 mt-4">
+                ⚠️ Having trouble in Incognito? Google Sign-In requires third-party cookies.
+                Try in a normal browser window.
+              </p>
             </div>
           </div>
         </div>
+        {showDebug && <DebugPanel />}
+        {!showDebug && (
+          <button 
+            onClick={() => setShowDebug(true)}
+            className="fixed bottom-4 right-4 bg-gray-800 text-white px-3 py-1 rounded text-xs"
+          >
+            Show Debug
+          </button>
+        )}
       </div>
     );
   }
@@ -370,24 +604,11 @@ function App() {
       <header className="bg-white shadow-sm border-b">
         <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
           <div className="flex justify-between items-center py-4">
-            <div className="flex items-center">
-              <h1 className="text-2xl font-bold text-gray-800">Face Wellness Tracker</h1>
-            </div>
+            <h1 className="text-2xl font-bold text-gray-800">Face Wellness Tracker</h1>
             <div className="flex items-center space-x-4">
-              <div className="flex items-center space-x-2">
-                <img 
-                  src={user.picture || '/api/placeholder/32/32'} 
-                  alt={user.name} 
-                  className="w-8 h-8 rounded-full"
-                />
-                <span className="text-sm font-medium text-gray-700">{user.name}</span>
-              </div>
-              <button
-                onClick={logout}
-                className="text-sm text-gray-500 hover:text-gray-700"
-              >
-                Logout
-              </button>
+              <img src={user.picture || ''} alt="" className="w-8 h-8 rounded-full"/>
+              <span className="text-sm font-medium text-gray-700">{user.name}</span>
+              <button onClick={logout} className="text-sm text-gray-500 hover:text-gray-700">Logout</button>
             </div>
           </div>
         </div>
@@ -400,22 +621,15 @@ function App() {
               <button
                 key={view}
                 onClick={() => {
-                  if (view !== 'camera') {
-                    stopCamera();
-                  }
-                  
+                  if (view !== 'camera') stopCamera();
                   setCurrentView(view);
-                  
-                  if (view === 'insights') {
-                    fetchInsights();
-                  } else if (view === 'history') {
-                    fetchHistory();
-                  }
+                  if (view === 'insights') fetchInsights();
+                  else if (view === 'history') fetchHistory();
                 }}
                 className={`py-4 px-2 border-b-2 font-medium text-sm capitalize ${
                   currentView === view
                     ? 'border-blue-500 text-blue-600'
-                    : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
+                    : 'border-transparent text-gray-500 hover:text-gray-700'
                 }`}
               >
                 {view}
@@ -425,7 +639,7 @@ function App() {
         </div>
       </nav>
 
-      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+      <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 pb-56">
         {currentView === 'home' && (
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
             <div className="bg-white rounded-lg shadow p-6">
@@ -444,68 +658,61 @@ function App() {
         )}
 
         {currentView === 'camera' && (
-          <div className="max-w-md mx-auto">
+          <div className="max-w-lg mx-auto">
             <div className="bg-white rounded-lg shadow p-6">
               <h3 className="text-lg font-semibold text-gray-800 mb-4">Take Today's Photo</h3>
               
-              {/* Error display */}
               {cameraError && (
                 <div className="mb-4 p-4 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
-                  {cameraError}
-                  <button 
-                    onClick={() => setCameraError(null)}
-                    className="ml-2 underline"
-                  >
-                    Dismiss
-                  </button>
+                  <strong>Error:</strong> {cameraError}
                 </div>
               )}
               
-              {/* Initial state - no camera, no captured image */}
-              {!showCamera && !capturedImage && (
+              {/* State 1: No camera, no captured image - show start button */}
+              {!cameraStream && !capturedImage && (
                 <div className="text-center">
                   <div className="bg-gray-100 rounded-lg p-8 mb-4">
                     <div className="text-6xl mb-4">📸</div>
                     <p className="text-gray-600 mb-4">Ready to capture your daily wellness photo?</p>
                     <button
                       onClick={startCamera}
-                      className="bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-blue-700 transition-colors"
+                      className="bg-blue-600 text-white px-8 py-4 rounded-lg font-semibold hover:bg-blue-700 transition-colors text-lg"
                     >
-                      Start Camera
+                      🎥 Start Camera
                     </button>
                   </div>
                 </div>
               )}
               
-              {/* Camera view - FIX: Video element always exists when showCamera is true */}
-              {showCamera && !capturedImage && (
+              {/* State 2: Camera stream active - show video */}
+              {cameraStream && !capturedImage && (
                 <div className="text-center">
-                  <div className="relative inline-block">
+                  <div className="relative bg-black rounded-lg overflow-hidden mb-4" style={{ minHeight: '360px' }}>
                     <video
                       ref={videoRef}
+                      id="camera-video"
                       autoPlay
                       playsInline
                       muted
-                      className="w-full max-w-sm rounded-lg mb-4 bg-black"
-                      style={{ transform: 'scaleX(-1)', minHeight: '300px' }}
+                      style={{ 
+                        width: '100%', 
+                        height: '100%',
+                        objectFit: 'cover',
+                        transform: 'scaleX(-1)'
+                      }}
                     />
-                    {/* Loading overlay while stream is connecting */}
-                    {!cameraStream && (
-                      <div className="absolute inset-0 flex items-center justify-center bg-gray-900 bg-opacity-50 rounded-lg">
-                        <div className="text-white text-center">
-                          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-white mx-auto mb-2"></div>
-                          <p>Connecting to camera...</p>
-                        </div>
-                      </div>
-                    )}
+                    {/* Face guide overlay */}
+                    <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                      <div className="w-48 h-64 border-2 border-white border-opacity-50 rounded-full"></div>
+                    </div>
                   </div>
-                  <div className="space-x-4">
+                  
+                  <div className="flex justify-center space-x-4">
                     <button
                       onClick={capturePhoto}
-                      disabled={!cameraStream}
-                      className="bg-green-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-green-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="bg-green-600 text-white px-8 py-3 rounded-lg font-semibold hover:bg-green-700 transition-colors"
                     >
-                      📷 Capture Photo
+                      📷 Capture
                     </button>
                     <button
                       onClick={stopCamera}
@@ -517,34 +724,32 @@ function App() {
                 </div>
               )}
               
-              {/* Captured image preview */}
+              {/* State 3: Photo captured - show preview */}
               {capturedImage && (
                 <div className="text-center">
-                  <div className="bg-gray-100 rounded-lg p-4 mb-4">
+                  <div className="mb-4">
                     <img 
                       src={URL.createObjectURL(capturedImage)} 
                       alt="Captured" 
-                      className="w-full max-w-sm mx-auto rounded-lg mb-4"
+                      className="w-full rounded-lg"
                     />
-                    <p className="text-gray-600 mb-4">📸 Photo captured! Ready to analyze?</p>
-                    <div className="space-x-4">
-                      <button
-                        onClick={analyzePhoto}
-                        disabled={uploadLoading}
-                        className="bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-blue-700 transition-colors disabled:opacity-50"
-                      >
-                        {uploadLoading ? '⏳ Analyzing...' : '🔍 Analyze Photo'}
-                      </button>
-                      <button
-                        onClick={() => {
-                          setCapturedImage(null);
-                          startCamera();
-                        }}
-                        className="bg-gray-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-gray-700 transition-colors"
-                      >
-                        🔄 Retake
-                      </button>
-                    </div>
+                  </div>
+                  <p className="text-gray-600 mb-4">📸 Photo captured! Ready to analyze?</p>
+                  <div className="flex justify-center space-x-4">
+                    <button
+                      onClick={analyzePhoto}
+                      disabled={uploadLoading}
+                      className="bg-blue-600 text-white px-8 py-3 rounded-lg font-semibold hover:bg-blue-700 disabled:opacity-50"
+                    >
+                      {uploadLoading ? '⏳ Analyzing...' : '🔍 Analyze'}
+                    </button>
+                    <button
+                      onClick={() => { setCapturedImage(null); startCamera(); }}
+                      disabled={uploadLoading}
+                      className="bg-gray-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-gray-700 disabled:opacity-50"
+                    >
+                      🔄 Retake
+                    </button>
                   </div>
                 </div>
               )}
@@ -558,58 +763,34 @@ function App() {
           <div className="max-w-2xl mx-auto">
             <div className="bg-white rounded-lg shadow p-6">
               <h3 className="text-lg font-semibold text-gray-800 mb-6">Analysis Results</h3>
-              
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                <div className="bg-blue-50 rounded-lg p-4">
-                  <h4 className="font-semibold text-blue-800 mb-2">Eye Puffiness</h4>
-                  <p className={`text-2xl font-bold ${getScoreColor(analysisResult.results.eye_pouch.value)}`}>
-                    {analysisResult.results.eye_pouch.value}/3
-                  </p>
-                  <p className="text-sm text-gray-600">
-                    {getScoreDescription(analysisResult.results.eye_pouch.value, 'eye_pouch')}
-                  </p>
-                  <p className="text-xs text-gray-500 mt-1">
-                    Confidence: {Math.round(analysisResult.results.eye_pouch.confidence * 100)}%
-                  </p>
-                </div>
-                
-                <div className="bg-purple-50 rounded-lg p-4">
-                  <h4 className="font-semibold text-purple-800 mb-2">Dark Circles</h4>
-                  <p className={`text-2xl font-bold ${getScoreColor(analysisResult.results.dark_circle.value)}`}>
-                    {analysisResult.results.dark_circle.value}/3
-                  </p>
-                  <p className="text-sm text-gray-600">
-                    {getScoreDescription(analysisResult.results.dark_circle.value, 'dark_circle')}
-                  </p>
-                  <p className="text-xs text-gray-500 mt-1">
-                    Confidence: {Math.round(analysisResult.results.dark_circle.confidence * 100)}%
-                  </p>
-                </div>
-                
-                <div className="bg-green-50 rounded-lg p-4">
-                  <h4 className="font-semibold text-green-800 mb-2">Skin Age</h4>
-                  <p className="text-2xl font-bold text-green-600">
-                    {analysisResult.results.skin_age.value} years
-                  </p>
-                  <p className="text-sm text-gray-600">Estimated skin age</p>
-                </div>
-                
-                <div className="bg-yellow-50 rounded-lg p-4">
-                  <h4 className="font-semibold text-yellow-800 mb-2">Wrinkles</h4>
-                  <p className={`text-2xl font-bold ${getScoreColor(analysisResult.results.forehead_wrinkle.value)}`}>
-                    {analysisResult.results.forehead_wrinkle.value}/3
-                  </p>
-                  <p className="text-sm text-gray-600">Forehead wrinkles</p>
-                  <p className="text-xs text-gray-500 mt-1">
-                    Confidence: {Math.round(analysisResult.results.forehead_wrinkle.confidence * 100)}%
-                  </p>
-                </div>
+              <div className="grid grid-cols-2 gap-4">
+                {['eye_pouch', 'dark_circle', 'skin_age', 'forehead_wrinkle'].map(key => {
+                  const result = analysisResult.results[key];
+                  const labels = {
+                    eye_pouch: 'Eye Puffiness',
+                    dark_circle: 'Dark Circles', 
+                    skin_age: 'Skin Age',
+                    forehead_wrinkle: 'Wrinkles'
+                  };
+                  return (
+                    <div key={key} className="bg-gray-50 rounded-lg p-4">
+                      <h4 className="font-semibold text-gray-800 mb-2">{labels[key]}</h4>
+                      <p className={`text-2xl font-bold ${key === 'skin_age' ? 'text-green-600' : getScoreColor(result.value)}`}>
+                        {key === 'skin_age' ? `${result.value} years` : `${result.value}/3`}
+                      </p>
+                      {result.confidence && (
+                        <p className="text-xs text-gray-500">
+                          Confidence: {Math.round(result.confidence * 100)}%
+                        </p>
+                      )}
+                    </div>
+                  );
+                })}
               </div>
-              
               <div className="mt-6 text-center">
                 <button
                   onClick={() => setCurrentView('home')}
-                  className="bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-blue-700 transition-colors"
+                  className="bg-blue-600 text-white px-6 py-3 rounded-lg font-semibold hover:bg-blue-700"
                 >
                   Back to Home
                 </button>
@@ -622,52 +803,41 @@ function App() {
           <div className="max-w-2xl mx-auto">
             <div className="bg-white rounded-lg shadow p-6">
               <h3 className="text-lg font-semibold text-gray-800 mb-6">Your Insights</h3>
-              
               {insights ? (
-                <div className="space-y-6">
+                <div className="space-y-4">
                   {insights.averages && (
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="grid grid-cols-3 gap-4 mb-6">
                       <div className="bg-blue-50 rounded-lg p-4 text-center">
-                        <p className="text-sm text-blue-800 font-medium">Avg Eye Puffiness</p>
+                        <p className="text-sm text-blue-800">Avg Eye Puffiness</p>
                         <p className="text-2xl font-bold text-blue-600">{insights.averages.eye_pouch}</p>
                       </div>
                       <div className="bg-purple-50 rounded-lg p-4 text-center">
-                        <p className="text-sm text-purple-800 font-medium">Avg Dark Circles</p>
+                        <p className="text-sm text-purple-800">Avg Dark Circles</p>
                         <p className="text-2xl font-bold text-purple-600">{insights.averages.dark_circle}</p>
                       </div>
                       <div className="bg-green-50 rounded-lg p-4 text-center">
-                        <p className="text-sm text-green-800 font-medium">Avg Skin Age</p>
+                        <p className="text-sm text-green-800">Avg Skin Age</p>
                         <p className="text-2xl font-bold text-green-600">{insights.averages.skin_age}</p>
                       </div>
                     </div>
                   )}
-                  
-                  <div className="space-y-4">
-                    <h4 className="font-semibold text-gray-800">Personalized Recommendations</h4>
-                    {insights.insights && insights.insights.length > 0 ? (
-                      insights.insights.map((insight, index) => (
-                        <div
-                          key={index}
-                          className={`p-4 rounded-lg ${
-                            insight.type === 'success' ? 'bg-green-50 border-green-200' :
-                            insight.type === 'warning' ? 'bg-yellow-50 border-yellow-200' :
-                            'bg-blue-50 border-blue-200'
-                          } border`}
-                        >
-                          <p className="text-sm">{insight.message}</p>
-                        </div>
-                      ))
-                    ) : (
-                      <div className="text-center py-4 text-gray-600">
-                        {insights.message || 'No insights available yet. Take more photos to generate insights!'}
-                      </div>
-                    )}
-                  </div>
+                  {insights.insights?.map((insight, i) => (
+                    <div key={i} className={`p-4 rounded-lg border ${
+                      insight.type === 'success' ? 'bg-green-50 border-green-200' :
+                      insight.type === 'warning' ? 'bg-yellow-50 border-yellow-200' :
+                      'bg-blue-50 border-blue-200'
+                    }`}>
+                      {insight.message}
+                    </div>
+                  ))}
+                  {(!insights.insights || insights.insights.length === 0) && (
+                    <p className="text-gray-600 text-center">{insights.message || 'Take more photos to generate insights!'}</p>
+                  )}
                 </div>
               ) : (
                 <div className="text-center py-8">
                   <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-blue-600 mx-auto"></div>
-                  <p className="mt-4 text-gray-600">Generating insights...</p>
+                  <p className="mt-4 text-gray-600">Loading insights...</p>
                 </div>
               )}
             </div>
@@ -678,16 +848,12 @@ function App() {
           <div className="max-w-4xl mx-auto">
             <div className="bg-white rounded-lg shadow p-6">
               <h3 className="text-lg font-semibold text-gray-800 mb-6">Analysis History</h3>
-              
-              {history && history.length > 0 ? (
+              {history.length > 0 ? (
                 <div className="space-y-4">
-                  {history.map((analysis, index) => (
-                    <div key={index} className="border border-gray-200 rounded-lg p-4">
-                      <div className="flex justify-between items-start mb-3">
-                        <h4 className="font-medium text-gray-800">{formatDate(analysis.timestamp)}</h4>
-                      </div>
-                      
-                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4 text-sm">
+                  {history.map((analysis, i) => (
+                    <div key={i} className="border rounded-lg p-4">
+                      <h4 className="font-medium text-gray-800 mb-2">{formatDate(analysis.timestamp)}</h4>
+                      <div className="grid grid-cols-4 gap-4 text-sm">
                         <div>
                           <p className="text-gray-600">Eye Puffiness</p>
                           <p className={`font-semibold ${getScoreColor(analysis.results.eye_pouch.value)}`}>
@@ -702,7 +868,7 @@ function App() {
                         </div>
                         <div>
                           <p className="text-gray-600">Skin Age</p>
-                          <p className="font-semibold text-green-600">{analysis.results.skin_age.value} years</p>
+                          <p className="font-semibold text-green-600">{analysis.results.skin_age.value} yrs</p>
                         </div>
                         <div>
                           <p className="text-gray-600">Wrinkles</p>
@@ -715,14 +881,22 @@ function App() {
                   ))}
                 </div>
               ) : (
-                <div className="text-center py-8">
-                  <p className="text-gray-600">No analysis history yet. Take your first photo!</p>
-                </div>
+                <p className="text-gray-600 text-center py-8">No history yet. Take your first photo!</p>
               )}
             </div>
           </div>
         )}
       </main>
+      
+      {showDebug && <DebugPanel />}
+      {!showDebug && (
+        <button 
+          onClick={() => setShowDebug(true)}
+          className="fixed bottom-4 right-4 bg-gray-800 text-white px-3 py-1 rounded text-xs z-40"
+        >
+          🔧 Debug
+        </button>
+      )}
     </div>
   );
 }
